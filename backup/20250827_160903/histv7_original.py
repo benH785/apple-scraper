@@ -48,256 +48,11 @@ PRICE_HISTORY_SHEET_NAME = "Price History"
 AVAILABILITY_HISTORY_SHEET_NAME = "Availability History"
 
 
-class AppleDataStandardizer:
-    """Embedded standardization logic for converting Apple data to dashboard format."""
-    
-    def __init__(self):
-        # Field mapping from Apple scraper to user's format
-        self.field_mapping = {
-            'name': 'Title',
-            'current_price': 'Price',
-            'url': 'URL',
-            'chip': 'CPU',
-            'cpu_cores': 'CPU Cores',
-            'memory': 'RAM (GB)',
-            'storage': 'HD (GB)',
-            'gpu_cores': 'GPU',
-            'color': 'Colour'
-        }
-        
-        # Fixed values for all Apple products
-        self.fixed_values = {
-            'Condition': 'Refurbished',
-            'Grade': 'Excellent',
-            'Seller': 'Apple',
-            'Warning': ''
-        }
-    
-    def _standardize_machine_type(self, name: str) -> str:
-        """Extract and standardize machine type with screen size from product name."""
-        if not name:
-            return 'Unknown'
-            
-        # Normalize Unicode characters
-        name_normalized = str(name).replace('‑', '-').replace('\xa0', ' ').lower()
-        
-        # Extract screen size first
-        screen_size = ''
-        size_patterns = [
-            r'(\d+(?:\.\d+)?)-inch',
-            r'(\d+(?:\.\d+)?)\s*inch'
-        ]
-        
-        for pattern in size_patterns:
-            size_match = re.search(pattern, name_normalized)
-            if size_match:
-                screen_size = f"{size_match.group(1)}-inch"
-                break
-        
-        # Determine machine type and combine with screen size
-        if 'macbook air' in name_normalized:
-            base_type = 'MacBook Air'
-            if screen_size:
-                return f"{base_type} {screen_size}"
-            return f"{base_type} 13-inch"
-            
-        elif 'macbook pro' in name_normalized:
-            base_type = 'MacBook Pro'
-            if screen_size:
-                return f"{base_type} {screen_size}"
-            return base_type
-            
-        elif 'imac' in name_normalized:
-            base_type = 'iMac'
-            if screen_size:
-                return f"{base_type} {screen_size}"
-            return base_type
-            
-        elif 'mac mini' in name_normalized:
-            return 'Mac mini'
-            
-        elif 'mac studio' in name_normalized:
-            return 'Mac Studio'
-            
-        elif 'mac pro' in name_normalized:
-            return 'Mac Pro'
-            
-        return 'Unknown'
-    
-    def _standardize_model(self, chip_or_model: str) -> str:
-        """Extract model/generation from chip or model field."""
-        if not chip_or_model:
-            return ''
-        
-        # Extract M-series chip info
-        chip_match = re.search(r'M(\d+)(?:\s+(Pro|Max|Ultra))?', chip_or_model, re.IGNORECASE)
-        if chip_match:
-            base = f"M{chip_match.group(1)}"
-            variant = chip_match.group(2)
-            if variant:
-                return f"{base} {variant}"
-            return base
-        
-        return chip_or_model
-    
-    def _standardize_storage_format(self, storage_gb: str) -> str:
-        """Convert storage to proper format (256, 512, 1TB, 2TB, etc.)."""
-        if not storage_gb:
-            return ''
-        
-        try:
-            gb_value = float(storage_gb)
-            # Convert values >= 1000 GB to TB format
-            if gb_value >= 1000 and gb_value % 1000 == 0:
-                tb_value = int(gb_value / 1000)
-                return f'{tb_value}TB'
-            else:
-                # Keep as number for values < 1000
-                return str(int(gb_value)) if gb_value == int(gb_value) else str(gb_value)
-        except (ValueError, TypeError):
-            return str(storage_gb)
-    
-    def _extract_year_from_chip(self, chip: str) -> str:
-        """Estimate year based on chip generation."""
-        if not chip:
-            return ''
-        
-        # Year mapping for M-series chips
-        year_mapping = {
-            'M1': '2020',
-            'M1 Pro': '2021', 
-            'M1 Max': '2021',
-            'M1 Ultra': '2022',
-            'M2': '2022',
-            'M2 Pro': '2023',
-            'M2 Max': '2023',
-            'M2 Ultra': '2023',
-            'M3': '2023',
-            'M3 Pro': '2023',
-            'M3 Max': '2023',
-            'M3 Ultra': '2025',  # Special case
-            'M4': '2024',
-            'M4 Pro': '2024',
-            'M4 Max': '2024'
-        }
-        
-        return year_mapping.get(chip, '')
-    
-    def _standardize_colour(self, color: str) -> str:
-        """Standardize color names."""
-        if not color or pd.isna(color):
-            return ''
-        
-        color = str(color).strip()
-        
-        # Standardize common color variations
-        color_mapping = {
-            'space grey': 'Space Grey',
-            'space gray': 'Space Grey', 
-            'silver': 'Silver',
-            'gold': 'Gold',
-            'rose gold': 'Rose Gold',
-            'midnight': 'Midnight',
-            'starlight': 'Starlight',
-            'blue': 'Blue',
-            'sky blue': 'Sky Blue',
-            'green': 'Green',
-            'pink': 'Pink',
-            'purple': 'Purple',
-            'yellow': 'Yellow',
-            'orange': 'Orange',
-            'red': 'Red'
-        }
-        
-        return color_mapping.get(color.lower(), color)
-    
-    def standardize_apple_product(self, apple_product: Dict) -> Dict:
-        """Convert single Apple product to user's dashboard format."""
-        standardized = {}
-        
-        # Map direct fields
-        for apple_field, user_field in self.field_mapping.items():
-            value = apple_product.get(apple_field, '')
-            
-            if user_field == 'RAM (GB)':
-                # Extract number from memory field
-                ram_match = re.search(r'(\d+)', str(value))
-                value = ram_match.group(1) if ram_match else str(value)
-            elif user_field == 'HD (GB)':
-                # Convert storage to GB first, then format
-                storage_str = str(value).upper()
-                storage_match = re.search(r'(\d+)(GB|TB)', storage_str)
-                if storage_match:
-                    number = int(storage_match.group(1))
-                    unit = storage_match.group(2)
-                    gb_value = number * 1000 if unit == 'TB' else number
-                    value = self._standardize_storage_format(str(gb_value))
-                else:
-                    value = self._standardize_storage_format(str(value))
-            elif user_field == 'CPU Cores':
-                # Extract number from CPU cores
-                core_match = re.search(r'(\d+)', str(value))
-                value = core_match.group(1) if core_match else str(value)
-            elif user_field == 'GPU':
-                # Extract number from GPU cores
-                gpu_match = re.search(r'(\d+)', str(value))
-                value = gpu_match.group(1) if gpu_match else str(value)
-            elif user_field == 'Colour':
-                value = self._standardize_colour(value)
-            
-            standardized[user_field] = value
-        
-        # Add fixed values
-        standardized.update(self.fixed_values)
-        
-        # Compute derived fields
-        machine_type = self._standardize_machine_type(apple_product.get('name', ''))
-        standardized['Machine'] = machine_type
-        standardized['Model'] = self._standardize_model(apple_product.get('chip', ''))
-        standardized['Year'] = self._extract_year_from_chip(apple_product.get('chip', ''))
-        
-        # Calculate price change (will be 0 for initial load)
-        standardized['Change'] = 0
-        
-        # Add timestamp fields
-        timestamp = apple_product.get('scraped_at', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        standardized['Timestamp'] = timestamp
-        
-        # Extract day from timestamp
-        try:
-            dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-            standardized['Timestamp Day'] = dt.strftime("%Y-%m-%d")
-        except:
-            standardized['Timestamp Day'] = datetime.now().strftime("%Y-%m-%d")
-        
-        # Placeholder for Variant ID (future implementation)
-        standardized['Variant ID'] = ''
-        
-        return standardized
-    
-    def standardize_apple_data(self, apple_products: List[Dict]) -> List[Dict]:
-        """Convert list of Apple products to standardized format."""
-        standardized_products = []
-        
-        for product in apple_products:
-            try:
-                standardized = self.standardize_apple_product(product)
-                standardized_products.append(standardized)
-            except Exception as e:
-                print(f"⚠️ Error standardizing product {product.get('name', 'Unknown')}: {e}")
-                continue
-        
-        return standardized_products
-
-
 class AppleMacScraperV7Historical:
     def __init__(self):
         self.base_url = "https://www.apple.com"
         self.mac_url = "https://www.apple.com/uk/shop/refurbished/mac"
         self.session = requests.Session()
-        
-        # Initialize standardizer for dual output
-        self.standardizer = AppleDataStandardizer()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -973,69 +728,6 @@ class AppleMacScraperV7Historical:
         except Exception as e:
             print(f"❌ Failed to update Current Inventory: {e}")
 
-    def upload_standardized_to_sheets(self, standardized_products: List[Dict]):
-        """Upload standardized products to Apple Products Standardized sheet."""
-        if not self.google_client or not standardized_products:
-            return
-            
-        try:
-            # Try to get existing sheet or create new one
-            try:
-                standardized_sheet = self.spreadsheet.worksheet("Apple Products Standardized")
-                print(f"📊 Using existing sheet: Apple Products Standardized")
-            except:
-                standardized_sheet = self.spreadsheet.add_worksheet(
-                    title="Apple Products Standardized", 
-                    rows=len(standardized_products) + 100, 
-                    cols=25
-                )
-                print(f"📊 Created new sheet: Apple Products Standardized")
-            
-            # Clear existing data
-            standardized_sheet.clear()
-            print(f"🧹 Cleared existing data")
-            
-            # Define standardized headers in correct order
-            standardized_headers = [
-                'Title', 'Condition', 'Price', 'Change', 'URL', 'Machine', 'Model', 'Year',
-                'CPU', 'CPU Cores', 'HD (GB)', 'RAM (GB)', 'GPU', 'Colour', 'Grade', 
-                'Seller', 'Warning', 'Timestamp', 'Timestamp Day', 'Timestamp Day', 'Variant ID'
-            ]
-            
-            # Prepare data with headers
-            data = [standardized_headers]
-            
-            for product in standardized_products:
-                row = []
-                for header in standardized_headers:
-                    value = product.get(header, '')
-                    if value is None:
-                        row.append('')
-                    else:
-                        row.append(str(value))
-                data.append(row)
-            
-            # Upload all data
-            print(f"📤 Uploading standardized data to Google Sheets...")
-            standardized_sheet.update(data, value_input_option='USER_ENTERED')
-            
-            # Format the header row
-            standardized_sheet.format('A1:U1', {
-                'backgroundColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2},
-                'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True}
-            })
-            
-            # Format price column as currency (Column C)
-            standardized_sheet.format('C2:C1000', {
-                'numberFormat': {'type': 'CURRENCY', 'pattern': '£#,##0.00'}
-            })
-            
-            print(f"✅ Successfully uploaded {len(standardized_products)} standardized products to Google Sheets!")
-            print(f"📊 Sheet: Apple Products Standardized")
-            
-        except Exception as e:
-            print(f"❌ Failed to upload standardized data: {e}")
-    
     def update_history_tab(self, products: List[Dict]):
         """Update the History tab with latest data (append, don't clear)."""
         if not self.google_client:
@@ -1143,30 +835,18 @@ class AppleMacScraperV7Historical:
             # Be respectful between product pages
             time.sleep(0.5)
         
-        # NEW: STEP 3: Generate standardized format
-        print(f"\n🔄 STEP 3: GENERATING STANDARDIZED FORMAT")
-        print("=" * 60)
-        standardized_products = self.standardizer.standardize_apple_data(detailed_products)
-        print(f"✅ Standardized {len(standardized_products)} products for dashboard")
-        
-        # NEW: STEP 4: Detect and log changes
-        print(f"\n📊 STEP 4: HISTORICAL CHANGE DETECTION")
+        # NEW: STEP 3: Detect and log changes
+        print(f"\n📊 STEP 3: HISTORICAL CHANGE DETECTION")
         print("=" * 60)
         self.detect_and_log_changes(detailed_products, previous_data)
         
-        # NEW: STEP 5: Update current inventory
-        print(f"\n💾 STEP 5: UPDATING CURRENT INVENTORY")
+        # NEW: STEP 4: Update current inventory
+        print(f"\n💾 STEP 4: UPDATING CURRENT INVENTORY")
         print("=" * 60)
         self.update_current_inventory(detailed_products)
         
-        # NEW: STEP 6: Upload standardized data
-        print(f"\n🎯 STEP 6: UPLOADING STANDARDIZED DATA")
-        print("=" * 60)
-        if self.google_client:
-            self.upload_standardized_to_sheets(standardized_products)
-        
-        # NEW: STEP 7: Update History tab
-        print(f"\n📊 STEP 7: UPDATING HISTORY TAB")
+        # NEW: STEP 5: Update History tab
+        print(f"\n📊 STEP 5: UPDATING HISTORY TAB")
         print("=" * 60)
         self.update_history_tab(detailed_products)
         
@@ -1362,9 +1042,6 @@ def main():
         # Upload to original Google Sheet (for compatibility)
         if scraper.google_client:
             scraper.upload_to_google_sheets(products)
-            
-            # Standardized format already uploaded during scraping process
-            print(f"\n✅ Standardized format already uploaded during scraping")
         else:
             print("💡 Enable Google Sheets to automatically sync data")
         
@@ -1376,7 +1053,6 @@ def main():
             print(f"📋 Current Inventory: {CURRENT_SHEET_NAME}")
             print(f"📈 Price History: {PRICE_HISTORY_SHEET_NAME}")
             print(f"📦 Availability History: {AVAILABILITY_HISTORY_SHEET_NAME}")
-            print(f"🎯 Standardized Sheet: Apple Products Standardized")
     
     print(f"\n⏰ Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     return products

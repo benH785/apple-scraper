@@ -8,7 +8,10 @@ A comprehensive scraper for Apple's UK refurbished Mac products with historical 
 - 💰 **Price Tracking**: Monitors current prices, original prices, and savings
 - 📊 **Historical Analysis**: Tracks price changes and product availability over time
 - 🔧 **Detailed Specs**: Extracts chip, memory, storage, display size, and color information
-- 📈 **Google Sheets Integration**: Automatic data sync with multiple tracking sheets
+- 🎯 **Dashboard Integration**: Automatically generates standardized format for React dashboards
+- 📈 **Dual Google Sheets Output**: 
+  - Raw Apple data for historical tracking
+  - Standardized format for dashboard consumption ("Apple Products Standardized" sheet)
 - ⏰ **Daily Automation**: Runs automatically every day via GitHub Actions
 
 ## Cloud Deployment Setup
