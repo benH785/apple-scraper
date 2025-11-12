@@ -49,9 +49,9 @@ AVAILABILITY_HISTORY_SHEET_NAME = "Availability History"
 
 
 class AppleDataStandardizer:
-    """Embedded standardization logic for converting Apple data to dashboard format."""
+    """Embedded standardizer for converting Apple scraper data to dashboard format."""
     
-    def __init__(self):
+    def __init__(self, google_client=None):
         # Field mapping from Apple scraper to user's format
         self.field_mapping = {
             'name': 'Title',
@@ -72,6 +72,129 @@ class AppleDataStandardizer:
             'Seller': 'Apple',
             'Warning': ''
         }
+        
+        # Machine type mappings
+        self.machine_mappings = {
+            'mac mini': 'Mac mini',
+            'macbook air': 'MacBook Air',
+            'macbook pro': 'MacBook Pro', 
+            'imac': 'iMac',
+            'mac studio': 'Mac Studio',
+            'mac pro': 'Mac Pro'
+        }
+        
+        # Model mappings for display sizes
+        self.model_mappings = {
+            'macbook air': {
+                '13': 'MacBook Air 13-inch',
+                '15': 'MacBook Air 15-inch'
+            },
+            'macbook pro': {
+                '13': 'MacBook Pro 13-inch',
+                '14': 'MacBook Pro 14-inch', 
+                '16': 'MacBook Pro 16-inch'
+            },
+            'imac': {
+                '21': 'iMac 21.5-inch',
+                '24': 'iMac 24-inch',
+                '27': 'iMac 27-inch'
+            }
+        }
+        
+        # Variant ID lookup
+        self.google_client = google_client
+        self.variant_lookup = None
+        self.load_variant_lookup()
+    
+    def load_variant_lookup(self):
+        """Load Variant ID lookup table from separate Variant Map spreadsheet."""
+        if not self.google_client:
+            print("❌ Google Sheets client not available")
+            return
+            
+        try:
+            # Access the separate Variant Map spreadsheet
+            variant_sheet_id = "1RClwLDnMZy9K_kzp3p24WyMa_cCBObhHAUcKcNdoSBw"
+            variant_gid = "1879870824"
+            
+            variant_spreadsheet = self.google_client.open_by_key(variant_sheet_id)
+            variant_worksheet = variant_spreadsheet.get_worksheet_by_id(int(variant_gid))
+            
+            # Get all data
+            data = variant_worksheet.get_all_values()
+            if not data:
+                print("❌ No data found in Variant Map")
+                return
+                
+            headers = data[0]
+            print(f"✅ Loaded {len(data)-1} Variant Map records")
+            
+            # Build lookup table from Variant Map data
+            # Headers: ['', 'Machine', 'Model', 'Year', 'CPU', 'CPU Cores', 'HD (GB)', 'RAM (GB)', 'GPU', 'Colour', 'Grade', 'Warranty', 'Cycles', 'Variant ID', 'Price']
+            self.variant_lookup = {}
+            for row in data[1:]:  # Skip header
+                if len(row) >= 14:  # Ensure we have Variant ID column (N)
+                    # Extract fields for matching (excluding Model - Column C)
+                    machine = row[1]        # Column B: Machine
+                    year = row[3]           # Column D: Year  
+                    cpu = row[4]            # Column E: CPU
+                    cpu_cores = row[5]      # Column F: CPU Cores
+                    hd = row[6]             # Column G: HD (GB)
+                    ram = row[7]            # Column H: RAM (GB)
+                    gpu = row[8]            # Column I: GPU
+                    colour = row[9]         # Column J: Colour
+                    grade = row[10]         # Column K: Grade
+                    variant_id = row[13]    # Column N: Variant ID
+                    
+                    if variant_id and machine and cpu and hd and ram:
+                        # Create lookup key without Model field
+                        lookup_key = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
+                        self.variant_lookup[lookup_key] = variant_id
+                        
+            print(f"✅ Created lookup table with {len(self.variant_lookup)} entries from Variant Map")
+            
+        except Exception as e:
+            print(f"❌ Error loading Variant ID lookup: {e}")
+            self.variant_lookup = None
+    
+    def find_variant_id_and_model(self, machine: str, year: str, cpu: str, cpu_cores: str, hd: str, ram: str, gpu: str, colour: str, grade: str) -> tuple:
+        """Find Variant ID for given specifications using Variant Map lookup (excluding Model field)."""
+        if not self.variant_lookup:
+            return '', ''
+            
+        # Create lookup key matching the format from load_variant_lookup
+        # Format: machine|year|cpu|cpu_cores|hd|ram|gpu|colour|grade
+        lookup_key = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
+        
+        if lookup_key in self.variant_lookup:
+            variant_id = self.variant_lookup[lookup_key]
+            return variant_id, ''  # Return Variant ID, empty model (will be populated from Variant Map if needed)
+        
+        # Try without GPU (common case where GPU field might be empty)
+        lookup_key_no_gpu = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}||{colour}|{grade}".lower()
+        if lookup_key_no_gpu in self.variant_lookup:
+            variant_id = self.variant_lookup[lookup_key_no_gpu]
+            return variant_id, ''
+        
+        # Try without color (common case where color field might be empty)
+        lookup_key_no_color = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|{gpu}||{grade}".lower()
+        if lookup_key_no_color in self.variant_lookup:
+            variant_id = self.variant_lookup[lookup_key_no_color]
+            return variant_id, ''
+        
+        # Try without both GPU and color
+        lookup_key_minimal = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|||{grade}".lower()
+        if lookup_key_minimal in self.variant_lookup:
+            variant_id = self.variant_lookup[lookup_key_minimal]
+            return variant_id, ''
+        
+        # Try without CPU cores (might not always be available)
+        lookup_key_no_cores = f"{machine}|{year}|{cpu}||{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
+        if lookup_key_no_cores in self.variant_lookup:
+            variant_id = self.variant_lookup[lookup_key_no_cores]
+            return variant_id, ''
+                
+        return '', ''
     
     def _standardize_machine_type(self, name: str) -> str:
         """Extract and standardize machine type with screen size from product name."""
@@ -239,9 +362,12 @@ class AppleDataStandardizer:
                 core_match = re.search(r'(\d+)', str(value))
                 value = core_match.group(1) if core_match else str(value)
             elif user_field == 'GPU':
-                # Extract number from GPU cores
+                # Extract number from GPU cores and add "-Core" suffix
                 gpu_match = re.search(r'(\d+)', str(value))
-                value = gpu_match.group(1) if gpu_match else str(value)
+                if gpu_match:
+                    value = f"{gpu_match.group(1)}-Core"
+                else:
+                    value = str(value)
             elif user_field == 'Colour':
                 value = self._standardize_colour(value)
             
@@ -253,7 +379,7 @@ class AppleDataStandardizer:
         # Compute derived fields
         machine_type = self._standardize_machine_type(apple_product.get('name', ''))
         standardized['Machine'] = machine_type
-        standardized['Model'] = self._standardize_model(apple_product.get('chip', ''))
+        standardized['Model'] = ''  # Will be populated from Variant ID lookup if available
         standardized['Year'] = self._extract_year_from_chip(apple_product.get('chip', ''))
         
         # Calculate price change (will be 0 for initial load)
@@ -270,8 +396,21 @@ class AppleDataStandardizer:
         except:
             standardized['Timestamp Day'] = datetime.now().strftime("%Y-%m-%d")
         
-        # Placeholder for Variant ID (future implementation)
-        standardized['Variant ID'] = ''
+        # NEW: Find Variant ID using ALL specification fields
+        machine = standardized.get('Machine', '')
+        model = standardized.get('Model', '')
+        year = standardized.get('Year', '')
+        cpu = standardized.get('CPU', '')
+        cpu_cores = standardized.get('CPU Cores', '')
+        hd = standardized.get('HD (GB)', '')
+        ram = standardized.get('RAM (GB)', '')
+        gpu = standardized.get('GPU', '')
+        colour = standardized.get('Colour', '')
+        grade = standardized.get('Grade', '')
+        
+        variant_id, model_number = self.find_variant_id_and_model(machine, year, cpu, cpu_cores, hd, ram, gpu, colour, grade)
+        standardized['Variant ID'] = variant_id
+        standardized['Model'] = model_number  # Now populated with actual Apple model number (A2918, etc.)
         
         return standardized
     
@@ -296,8 +435,8 @@ class AppleMacScraperV7Historical:
         self.mac_url = "https://www.apple.com/uk/shop/refurbished/mac"
         self.session = requests.Session()
         
-        # Initialize standardizer for dual output
-        self.standardizer = AppleDataStandardizer()
+        # Initialize standardizer for dual output (pass Google client for Variant ID lookup)
+        self.standardizer = None  # Will be initialized after Google Sheets setup
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -333,6 +472,9 @@ class AppleMacScraperV7Historical:
             # NEW: Get the spreadsheet and ensure historical sheets exist
             self.spreadsheet = self.google_client.open_by_key(GOOGLE_SHEET_ID)
             self.ensure_historical_sheets_exist()
+            
+            # Initialize standardizer with Google client for Variant ID lookup
+            self.standardizer = AppleDataStandardizer(self.google_client)
             
             return True
             
@@ -1081,6 +1223,67 @@ class AppleMacScraperV7Historical:
                 
         except Exception as e:
             print(f"❌ Failed to update History tab: {e}")
+    
+    def update_standardized_history_tab(self, standardized_products: List[Dict]):
+        """Update the Standardized History tab with latest standardized data (append, don't clear)."""
+        if not self.google_client:
+            return
+            
+        try:
+            # Try to get existing sheet or create new one
+            try:
+                standardized_history_sheet = self.spreadsheet.worksheet("Standardized History")
+                print(f"📊 Using existing sheet: Standardized History")
+            except:
+                standardized_history_sheet = self.spreadsheet.add_worksheet(
+                    title="Standardized History", 
+                    rows=5000, 
+                    cols=21
+                )
+                print(f"📊 Created new sheet: Standardized History")
+                
+                # Add headers for new sheet
+                standardized_headers = [
+                    'Title', 'Condition', 'Price', 'Change', 'URL', 'Machine', 'Model', 'Year',
+                    'CPU', 'CPU Cores', 'HD (GB)', 'RAM (GB)', 'GPU', 'Colour', 'Grade', 
+                    'Seller', 'Warning', 'Timestamp', 'Timestamp Day', 'Timestamp Day', 'Variant ID'
+                ]
+                standardized_history_sheet.append_row(standardized_headers)
+                
+                # Format the header row
+                standardized_history_sheet.format('A1:U1', {
+                    'backgroundColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2},
+                    'textFormat': {'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}, 'bold': True}
+                })
+            
+            if standardized_products:
+                # Define standardized headers in correct order
+                standardized_headers = [
+                    'Title', 'Condition', 'Price', 'Change', 'URL', 'Machine', 'Model', 'Year',
+                    'CPU', 'CPU Cores', 'HD (GB)', 'RAM (GB)', 'GPU', 'Colour', 'Grade', 
+                    'Seller', 'Warning', 'Timestamp', 'Timestamp Day', 'Timestamp Day', 'Variant ID'
+                ]
+                
+                # Prepare data rows
+                data = []
+                
+                for product in standardized_products:
+                    row = []
+                    for header in standardized_headers:
+                        value = product.get(header, '')
+                        if value is None:
+                            row.append('')
+                        else:
+                            row.append(str(value))
+                    data.append(row)
+                
+                # Append all data to Standardized History tab (don't clear)
+                self.batch_append_to_sheet(standardized_history_sheet, data)
+                
+                print(f"✅ Updated Standardized History tab with {len(standardized_products)} products")
+                
+        except Exception as e:
+            print(f"❌ Failed to update Standardized History tab: {e}")
 
     def scrape_all_mac_products(self) -> List[Dict]:
         """MAIN SCRAPING METHOD - Your working method + historical tracking."""
@@ -1169,6 +1372,11 @@ class AppleMacScraperV7Historical:
         print(f"\n📊 STEP 7: UPDATING HISTORY TAB")
         print("=" * 60)
         self.update_history_tab(detailed_products)
+        
+        # NEW: STEP 8: Update Standardized History tab
+        print(f"\n📊 STEP 8: UPDATING STANDARDIZED HISTORY TAB")
+        print("=" * 60)
+        self.update_standardized_history_tab(standardized_products)
         
         return detailed_products
 
@@ -1328,6 +1536,7 @@ class AppleMacScraperV7Historical:
         print(f"   📋 Current Inventory: Updated with latest data")
         print(f"   📈 Price History: Tracking all price changes over time")
         print(f"   📦 Availability History: Tracking products appearing/disappearing")
+        print(f"   🎯 Standardized History: Tracking standardized format over time")
         print(f"   🔗 View data: https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}")
 
 
@@ -1377,6 +1586,7 @@ def main():
             print(f"📈 Price History: {PRICE_HISTORY_SHEET_NAME}")
             print(f"📦 Availability History: {AVAILABILITY_HISTORY_SHEET_NAME}")
             print(f"🎯 Standardized Sheet: Apple Products Standardized")
+            print(f"📊 Standardized History: Standardized History")
     
     print(f"\n⏰ Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     return products
