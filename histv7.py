@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
 Apple Mac Refurbished Scraper V7 - Your Working V6 + Basic Historical Tracking
+Now with dual-write to PostgreSQL database
 
 Starting from your proven working V6, adding minimal historical tracking:
 1. Keep all your working code exactly as-is
 2. Add simple historical comparison
 3. Create separate history sheets for tracking changes
+4. Dual-write to PostgreSQL database (optional)
 
 SETUP INSTRUCTIONS:
-1. Install required packages: pip3 install requests beautifulsoup4 lxml pandas gspread oauth2client
+1. Install required packages: pip3 install requests beautifulsoup4 lxml pandas gspread oauth2client psycopg2-binary python-dotenv
 2. Put your credentials.json file in the same folder as this script
 3. Enable Google Drive API and Google Sheets API in Google Cloud Console
+4. (Optional) Set DATABASE_URL environment variable for database writes
 
 Dependencies:
-    pip3 install requests beautifulsoup4 lxml pandas gspread oauth2client
+    pip3 install requests beautifulsoup4 lxml pandas gspread oauth2client psycopg2-binary python-dotenv
 """
 
 import requests
@@ -26,6 +29,14 @@ from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional, Set
 import pandas as pd
+
+# Database writer for dual-write capability
+try:
+    from database_writer import DatabaseWriter
+    DATABASE_AVAILABLE = True
+except ImportError:
+    DATABASE_AVAILABLE = False
+    print("Database writer not available - continuing with Sheets only")
 
 # Google Sheets integration
 try:
@@ -1378,6 +1389,9 @@ class AppleMacScraperV7Historical:
         print("=" * 60)
         self.update_standardized_history_tab(standardized_products)
         
+        # Store standardized products for database write
+        self.standardized_products = standardized_products
+        
         return detailed_products
 
     # UNCHANGED: All your existing working methods
@@ -1548,12 +1562,23 @@ def main():
     
     scraper = AppleMacScraperV7Historical()
     
+    # Initialize database writer for dual-write
+    db_writer = None
+    if DATABASE_AVAILABLE:
+        db_writer = DatabaseWriter()
+    
     # Check Google Sheets setup
     if scraper.google_client:
         print(f"📊 Google Sheets: ✅ Ready")
         print(f"📋 Historical Tracking: ✅ Ready")
     else:
         print(f"📊 Google Sheets: ❌ Not available")
+    
+    # Check database setup
+    if db_writer and db_writer.enabled:
+        print(f"💾 Database: ✅ Ready (dual-write enabled)")
+    else:
+        print(f"💾 Database: ❌ Not available (Sheets only)")
     
     print(f"\n⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -1576,6 +1601,14 @@ def main():
             print(f"\n✅ Standardized format already uploaded during scraping")
         else:
             print("💡 Enable Google Sheets to automatically sync data")
+        
+        # Write standardized products to database (dual-write)
+        if db_writer and db_writer.enabled and hasattr(scraper, 'standardized_products'):
+            print(f"\n💾 Writing to database...")
+            count = db_writer.write_to_apple_history(scraper.standardized_products)
+            if count > 0:
+                print(f"✅ Written {count} products to database")
+            db_writer.close()
         
         print(f"\n✅ All done! Found {len(products)} products with historical tracking")
         if csv_file:

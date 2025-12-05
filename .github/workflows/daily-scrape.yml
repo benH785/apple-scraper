@@ -29,6 +29,8 @@ jobs:
         echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
         
     - name: Run scraper
+      env:
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
       run: |
         python histv7.py
         
