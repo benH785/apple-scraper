@@ -891,8 +891,9 @@ class AppleDataStandardizer:
         if not standardized.get('Colour'):
             standardized['Colour'] = self._extract_colour_from_name(product_name)
         
-        # Extract Storage from product name for iPhones/iPads if not already populated
-        if not standardized.get('HD (GB)') and ('iphone' in machine_type.lower() or 'ipad' in machine_type.lower()):
+        # Extract Storage from product name for iPhones/iPads
+        # ALWAYS extract from product name for these devices as page-scraped storage shows max options, not actual product storage
+        if 'iphone' in machine_type.lower() or 'ipad' in machine_type.lower():
             # Match storage with unit (e.g., "512GB" or "1TB")
             storage_match = re.search(r'(\d+)\s*(GB|TB)', product_name, re.IGNORECASE)
             if storage_match:
