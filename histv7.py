@@ -893,11 +893,13 @@ class AppleDataStandardizer:
         
         # Extract Storage from product name for iPhones/iPads if not already populated
         if not standardized.get('HD (GB)') and ('iphone' in machine_type.lower() or 'ipad' in machine_type.lower()):
-            storage_match = re.search(r'(\d+)\s*(?:GB|TB)', product_name, re.IGNORECASE)
+            # Match storage with unit (e.g., "512GB" or "1TB")
+            storage_match = re.search(r'(\d+)\s*(GB|TB)', product_name, re.IGNORECASE)
             if storage_match:
                 storage_val = int(storage_match.group(1))
-                # Check if it's TB (usually 1TB or 2TB)
-                if 'TB' in product_name.upper() and storage_val <= 4:
+                storage_unit = storage_match.group(2).upper()
+                # Convert TB to GB
+                if storage_unit == 'TB':
                     storage_val = storage_val * 1000
                 standardized['HD (GB)'] = str(storage_val)
         
