@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
-Apple Mac Refurbished Scraper V7 - Your Working V6 + Basic Historical Tracking
+Apple Refurbished Scraper V7 - Mac, iPad & iPhone Support
 Now with dual-write to PostgreSQL database
 
-Starting from your proven working V6, adding minimal historical tracking:
-1. Keep all your working code exactly as-is
-2. Add simple historical comparison
-3. Create separate history sheets for tracking changes
+Features:
+1. Scrapes Mac, iPad, and iPhone refurbished products from Apple UK
+2. Historical tracking with price and availability change detection
+3. Standardized output format for dashboard integration
 4. Dual-write to PostgreSQL database (optional)
+5. Google Sheets integration for data storage
+
+USAGE:
+    python histv7.py                    # Scrape all (mac, ipad, iphone)
+    python histv7.py mac                # Scrape Mac only
+    python histv7.py ipad               # Scrape iPad only  
+    python histv7.py iphone             # Scrape iPhone only
+    python histv7.py mac ipad           # Scrape Mac and iPad
 
 SETUP INSTRUCTIONS:
 1. Install required packages: pip3 install requests beautifulsoup4 lxml pandas gspread oauth2client psycopg2-binary python-dotenv
@@ -37,6 +45,15 @@ try:
 except ImportError:
     DATABASE_AVAILABLE = False
     print("Database writer not available - continuing with Sheets only")
+
+# PostgreSQL for variant lookup
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+    print("psycopg2 not available - variant lookup from database disabled")
 
 # Google Sheets integration
 try:
@@ -91,7 +108,14 @@ class AppleDataStandardizer:
             'macbook pro': 'MacBook Pro', 
             'imac': 'iMac',
             'mac studio': 'Mac Studio',
-            'mac pro': 'Mac Pro'
+            'mac pro': 'Mac Pro',
+            # iPad mappings
+            'ipad pro': 'iPad Pro',
+            'ipad air': 'iPad Air',
+            'ipad mini': 'iPad mini',
+            'ipad': 'iPad',
+            # iPhone mappings
+            'iphone': 'iPhone'
         }
         
         # Model mappings for display sizes
@@ -109,67 +133,144 @@ class AppleDataStandardizer:
                 '21': 'iMac 21.5-inch',
                 '24': 'iMac 24-inch',
                 '27': 'iMac 27-inch'
+            },
+            'ipad pro': {
+                '11': 'iPad Pro 11-inch',
+                '12': 'iPad Pro 12.9-inch',
+                '12.9': 'iPad Pro 12.9-inch',
+                '13': 'iPad Pro 13-inch'
+            },
+            'ipad air': {
+                '10': 'iPad Air 10.9-inch',
+                '10.9': 'iPad Air 10.9-inch',
+                '11': 'iPad Air 11-inch',
+                '13': 'iPad Air 13-inch'
+            },
+            'ipad mini': {
+                '8': 'iPad mini 8.3-inch',
+                '8.3': 'iPad mini 8.3-inch'
+            },
+            'ipad': {
+                '10': 'iPad 10.9-inch',
+                '10.2': 'iPad 10.2-inch',
+                '10.9': 'iPad 10.9-inch'
             }
         }
         
-        # Variant ID lookup
+        # Variant ID lookup - now uses database instead of Google Sheets
         self.google_client = google_client
         self.variant_lookup = None
+        self.variant_lookup_simple = None  # For iPhone/iPad (machine|storage|colour|grade)
+        self.database_url = os.environ.get('DATABASE_URL')
         self.load_variant_lookup()
     
     def load_variant_lookup(self):
-        """Load Variant ID lookup table from separate Variant Map spreadsheet."""
-        if not self.google_client:
-            print("❌ Google Sheets client not available")
+        """Load Variant ID lookup table from PostgreSQL database."""
+        if not PSYCOPG2_AVAILABLE:
+            print("❌ psycopg2 not available - variant lookup disabled")
+            return
+        
+        if not self.database_url:
+            # Try to load from .env file in backmarket-scraper
+            env_path = os.path.join(os.path.dirname(__file__), '..', 'backmarket-scraper', '.env')
+            if os.path.exists(env_path):
+                with open(env_path) as f:
+                    for line in f:
+                        if line.startswith('DATABASE_URL='):
+                            self.database_url = line.strip().split('=', 1)[1]
+                            break
+        
+        if not self.database_url:
+            print("❌ DATABASE_URL not set - variant lookup disabled")
             return
             
         try:
-            # Access the separate Variant Map spreadsheet
-            variant_sheet_id = "1RClwLDnMZy9K_kzp3p24WyMa_cCBObhHAUcKcNdoSBw"
-            variant_gid = "1879870824"
+            # Connect to database
+            conn = psycopg2.connect(self.database_url, sslmode='require')
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             
-            variant_spreadsheet = self.google_client.open_by_key(variant_sheet_id)
-            variant_worksheet = variant_spreadsheet.get_worksheet_by_id(int(variant_gid))
+            # Fetch all variants
+            cursor.execute("""
+                SELECT variant_id, machine, model, year, cpu, cpu_cores, 
+                       storage, ram, gpu, colour, grade
+                FROM variants
+            """)
+            rows = cursor.fetchall()
             
-            # Get all data
-            data = variant_worksheet.get_all_values()
-            if not data:
-                print("❌ No data found in Variant Map")
-                return
+            print(f"✅ Loaded {len(rows)} variants from database")
+            
+            # Build lookup tables
+            self.variant_lookup = {}  # Full lookup for Macs
+            self.variant_lookup_simple = {}  # Simple lookup for iPhone/iPad
+            
+            for row in rows:
+                variant_id = str(row['variant_id'])
+                machine = row['machine'] or ''
+                model = row['model'] or ''
+                year = str(row['year']) if row['year'] else ''
+                cpu = row['cpu'] or ''
+                cpu_cores = row['cpu_cores'] or ''
+                storage = row['storage'] or ''
+                ram = row['ram'] or ''
+                gpu = row['gpu'] or ''
+                colour = row['colour'] or ''
+                grade = row['grade'] or ''
                 
-            headers = data[0]
-            print(f"✅ Loaded {len(data)-1} Variant Map records")
+                # Full lookup key for Macs (machine|year|cpu|cpu_cores|storage|ram|gpu|colour|grade)
+                if cpu and ram:  # Mac products have CPU and RAM
+                    lookup_key = f"{machine}|{year}|{cpu}|{cpu_cores}|{storage}|{ram}|{gpu}|{colour}|{grade}".lower()
+                    self.variant_lookup[lookup_key] = variant_id
+                
+                # Simple lookup key for iPhone/iPad (machine|storage|colour|grade)
+                # These products don't have CPU/RAM in the traditional sense
+                if 'iphone' in machine.lower() or 'ipad' in machine.lower():
+                    simple_key = f"{machine}|{storage}|{colour}|{grade}".lower()
+                    self.variant_lookup_simple[simple_key] = variant_id
             
-            # Build lookup table from Variant Map data
-            # Headers: ['', 'Machine', 'Model', 'Year', 'CPU', 'CPU Cores', 'HD (GB)', 'RAM (GB)', 'GPU', 'Colour', 'Grade', 'Warranty', 'Cycles', 'Variant ID', 'Price']
-            self.variant_lookup = {}
-            for row in data[1:]:  # Skip header
-                if len(row) >= 14:  # Ensure we have Variant ID column (N)
-                    # Extract fields for matching (excluding Model - Column C)
-                    machine = row[1]        # Column B: Machine
-                    year = row[3]           # Column D: Year  
-                    cpu = row[4]            # Column E: CPU
-                    cpu_cores = row[5]      # Column F: CPU Cores
-                    hd = row[6]             # Column G: HD (GB)
-                    ram = row[7]            # Column H: RAM (GB)
-                    gpu = row[8]            # Column I: GPU
-                    colour = row[9]         # Column J: Colour
-                    grade = row[10]         # Column K: Grade
-                    variant_id = row[13]    # Column N: Variant ID
-                    
-                    if variant_id and machine and cpu and hd and ram:
-                        # Create lookup key without Model field
-                        lookup_key = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
-                        self.variant_lookup[lookup_key] = variant_id
-                        
-            print(f"✅ Created lookup table with {len(self.variant_lookup)} entries from Variant Map")
+            cursor.close()
+            conn.close()
+            
+            print(f"✅ Created lookup tables: {len(self.variant_lookup)} Mac entries, {len(self.variant_lookup_simple)} iPhone/iPad entries")
             
         except Exception as e:
-            print(f"❌ Error loading Variant ID lookup: {e}")
+            print(f"❌ Error loading Variant ID lookup from database: {e}")
             self.variant_lookup = None
+            self.variant_lookup_simple = None
     
     def find_variant_id_and_model(self, machine: str, year: str, cpu: str, cpu_cores: str, hd: str, ram: str, gpu: str, colour: str, grade: str) -> tuple:
-        """Find Variant ID for given specifications using Variant Map lookup (excluding Model field)."""
+        """Find Variant ID for given specifications using database lookup."""
+        
+        # For iPhone/iPad, use simple lookup (machine|storage|colour|grade)
+        if self.variant_lookup_simple and ('iphone' in machine.lower() or 'ipad' in machine.lower()):
+            # Convert storage format: "256" or "1TB" -> just the number
+            storage = hd.replace('TB', '000').replace('GB', '') if hd else ''
+            # Handle TB conversion properly
+            if 'TB' in str(hd).upper():
+                try:
+                    tb_val = int(str(hd).upper().replace('TB', ''))
+                    storage = str(tb_val * 1000)
+                except:
+                    storage = hd
+            
+            # Try exact match first
+            simple_key = f"{machine}|{storage}|{colour}|{grade}".lower()
+            if simple_key in self.variant_lookup_simple:
+                return self.variant_lookup_simple[simple_key], ''
+            
+            # Try with different grade variations
+            for try_grade in ['Excellent', 'Good', 'Fair']:
+                simple_key = f"{machine}|{storage}|{colour}|{try_grade}".lower()
+                if simple_key in self.variant_lookup_simple:
+                    return self.variant_lookup_simple[simple_key], ''
+            
+            # Try without colour (some variants might not have colour specified)
+            simple_key_no_colour = f"{machine}|{storage}||{grade}".lower()
+            if simple_key_no_colour in self.variant_lookup_simple:
+                return self.variant_lookup_simple[simple_key_no_colour], ''
+            
+            return '', ''
+        
+        # For Macs, use full lookup
         if not self.variant_lookup:
             return '', ''
             
@@ -229,6 +330,7 @@ class AppleDataStandardizer:
                 break
         
         # Determine machine type and combine with screen size
+        # Mac products
         if 'macbook air' in name_normalized:
             base_type = 'MacBook Air'
             if screen_size:
@@ -255,8 +357,276 @@ class AppleDataStandardizer:
             
         elif 'mac pro' in name_normalized:
             return 'Mac Pro'
+        
+        # iPad products - check specific types first (Pro, Air, mini) before generic iPad
+        elif 'ipad pro' in name_normalized:
+            base_type = 'iPad Pro'
+            if screen_size:
+                return f"{base_type} {screen_size}"
+            return base_type
+            
+        elif 'ipad air' in name_normalized:
+            base_type = 'iPad Air'
+            if screen_size:
+                return f"{base_type} {screen_size}"
+            return base_type
+            
+        elif 'ipad mini' in name_normalized:
+            # iPad mini doesn't typically include screen size in name
+            return 'iPad mini'
+            
+        elif 'ipad' in name_normalized:
+            base_type = 'iPad'
+            if screen_size:
+                return f"{base_type} {screen_size}"
+            return base_type
+        
+        # iPhone products - extract model number and variant
+        elif 'iphone' in name_normalized:
+            # Try to extract iPhone model (e.g., iPhone 14, iPhone 15 Pro Max)
+            iphone_match = re.search(r'iphone\s*(\d+)\s*(pro\s*max|pro|plus|mini)?', name_normalized)
+            if iphone_match:
+                model_num = iphone_match.group(1)
+                variant = iphone_match.group(2) or ''
+                if variant:
+                    variant = variant.replace('pro max', 'Pro Max').replace('pro', 'Pro').replace('plus', 'Plus').replace('mini', 'mini')
+                    return f"iPhone {model_num} {variant}"
+                return f"iPhone {model_num}"
+            return 'iPhone'
             
         return 'Unknown'
+    
+    # iPad model number lookup table
+    # Format: (device_type, screen_size, chip/generation, connectivity) -> model_number
+    # Note: iPad Pro 12.9-inch (M1/M2) was replaced by iPad Pro 13-inch (M4/M5) - different product lines
+    IPAD_MODEL_NUMBERS = {
+        # iPad Pro 13-inch (M5) - 2025 (newest)
+        ('ipad pro', '13', 'm5', 'wifi'): 'A3325',  # TODO: Verify model numbers when available
+        ('ipad pro', '13', 'm5', 'cellular'): 'A3326',
+        # iPad Pro 11-inch (M5) - 2025 (newest)
+        ('ipad pro', '11', 'm5', 'wifi'): 'A3323',
+        ('ipad pro', '11', 'm5', 'cellular'): 'A3324',
+        # iPad Pro 13-inch (M4) - 2024
+        ('ipad pro', '13', 'm4', 'wifi'): 'A2925',
+        ('ipad pro', '13', 'm4', 'cellular'): 'A2926',
+        # iPad Pro 11-inch (M4) - 2024
+        ('ipad pro', '11', 'm4', 'wifi'): 'A2836',
+        ('ipad pro', '11', 'm4', 'cellular'): 'A2837',
+        # iPad Pro 12.9-inch (6th generation / M2) - 2022 (last 12.9-inch model)
+        ('ipad pro', '12.9', '6th', 'wifi'): 'A2436',
+        ('ipad pro', '12.9', '6th', 'cellular'): 'A2437',
+        ('ipad pro', '12.9', 'm2', 'wifi'): 'A2436',
+        ('ipad pro', '12.9', 'm2', 'cellular'): 'A2437',
+        # iPad Pro 11-inch (4th generation / M2) - 2022
+        ('ipad pro', '11', '4th', 'wifi'): 'A2759',
+        ('ipad pro', '11', '4th', 'cellular'): 'A2761',
+        ('ipad pro', '11', 'm2', 'wifi'): 'A2759',
+        ('ipad pro', '11', 'm2', 'cellular'): 'A2761',
+        # iPad Pro 12.9-inch (5th generation / M1) - 2021
+        ('ipad pro', '12.9', '5th', 'wifi'): 'A2378',
+        ('ipad pro', '12.9', '5th', 'cellular'): 'A2461',
+        ('ipad pro', '12.9', 'm1', 'wifi'): 'A2378',
+        ('ipad pro', '12.9', 'm1', 'cellular'): 'A2461',
+        # iPad Pro 11-inch (3rd generation / M1) - 2021
+        ('ipad pro', '11', '3rd', 'wifi'): 'A2377',
+        ('ipad pro', '11', '3rd', 'cellular'): 'A2459',
+        ('ipad pro', '11', 'm1', 'wifi'): 'A2377',
+        ('ipad pro', '11', 'm1', 'cellular'): 'A2459',
+        
+        # iPad Air 13-inch (M3) - 2025
+        ('ipad air', '13', 'm3', 'wifi'): 'A3268',
+        ('ipad air', '13', 'm3', 'cellular'): 'A3269',
+        # iPad Air 11-inch (M3) - 2025
+        ('ipad air', '11', 'm3', 'wifi'): 'A3266',
+        ('ipad air', '11', 'm3', 'cellular'): 'A3267',
+        # iPad Air 13-inch (M2) - 2024
+        ('ipad air', '13', 'm2', 'wifi'): 'A2898',
+        ('ipad air', '13', 'm2', 'cellular'): 'A2899',
+        # iPad Air 11-inch (M2) - 2024
+        ('ipad air', '11', 'm2', 'wifi'): 'A2902',
+        ('ipad air', '11', 'm2', 'cellular'): 'A2903',
+        # iPad Air (5th generation / M1) - 2022
+        ('ipad air', '10.9', '5th', 'wifi'): 'A2588',
+        ('ipad air', '10.9', '5th', 'cellular'): 'A2589',
+        ('ipad air', '10.9', 'm1', 'wifi'): 'A2588',
+        ('ipad air', '10.9', 'm1', 'cellular'): 'A2589',
+        ('ipad air', '', '5th', 'wifi'): 'A2588',
+        ('ipad air', '', '5th', 'cellular'): 'A2589',
+        ('ipad air', '', 'm1', 'wifi'): 'A2588',
+        ('ipad air', '', 'm1', 'cellular'): 'A2589',
+        
+        # iPad mini (6th generation) - 2021
+        ('ipad mini', '', '6th', 'wifi'): 'A2567',
+        ('ipad mini', '', '6th', 'cellular'): 'A2568',
+        ('ipad mini', '', '6', 'wifi'): 'A2567',
+        ('ipad mini', '', '6', 'cellular'): 'A2568',
+        # iPad mini (A17 Pro) - 2024
+        ('ipad mini', '', 'a17', 'wifi'): 'A2993',
+        ('ipad mini', '', 'a17', 'cellular'): 'A2995',
+    }
+    
+    # iPhone model number lookup table (using "other countries and regions" model numbers)
+    # Format: (model_number, variant) -> model_number
+    # Variants: '', 'pro', 'pro max', 'plus', 'mini', 'se', 'air', 'e'
+    IPHONE_MODEL_NUMBERS = {
+        # iPhone 17 series - 2025
+        ('17', 'pro max'): 'A3526',
+        ('17', 'pro'): 'A3523',
+        ('17', ''): 'A3520',
+        # iPhone Air - 2025
+        ('air', ''): 'A3517',
+        # iPhone 16e - 2025
+        ('16e', ''): 'A3409',
+        # iPhone 16 series - 2024
+        ('16', 'pro max'): 'A3296',
+        ('16', 'pro'): 'A3293',
+        ('16', 'plus'): 'A3290',
+        ('16', ''): 'A3287',
+        # iPhone 15 series - 2023
+        ('15', 'pro max'): 'A3106',
+        ('15', 'pro'): 'A3102',
+        ('15', 'plus'): 'A3094',
+        ('15', ''): 'A3090',
+        # iPhone 14 series - 2022
+        ('14', 'pro max'): 'A2894',
+        ('14', 'pro'): 'A2890',
+        ('14', 'plus'): 'A2886',
+        ('14', ''): 'A2882',
+        # iPhone SE (3rd generation) - 2022
+        ('se', '3rd'): 'A2783',
+        ('se', ''): 'A2783',
+        # iPhone 13 series - 2021
+        ('13', 'pro max'): 'A2643',
+        ('13', 'pro'): 'A2638',
+        ('13', 'mini'): 'A2628',
+        ('13', ''): 'A2633',
+        # iPhone 12 series - 2020
+        ('12', 'pro max'): 'A2411',
+        ('12', 'pro'): 'A2407',
+        ('12', 'mini'): 'A2399',
+        ('12', ''): 'A2403',
+        # iPhone SE (2nd generation) - 2020
+        ('se', '2nd'): 'A2296',
+        # iPhone 11 series - 2019
+        ('11', 'pro max'): 'A2218',
+        ('11', 'pro'): 'A2215',
+        ('11', ''): 'A2221',
+    }
+    
+    def _extract_model_info(self, name: str, machine_type: str) -> str:
+        """Extract Apple model number from product name.
+        
+        For iPads: Returns Apple model number (e.g., A2567, A2898)
+        For iPhones: Returns Apple model number if available
+        For Macs: Returns empty string (will be populated from Variant lookup)
+        """
+        if not name:
+            return ''
+        
+        name_normalized = str(name).replace('‑', '-').replace('\xa0', ' ').lower()
+        
+        # iPad models - look up Apple model number
+        if 'ipad' in machine_type.lower():
+            # Determine device type
+            if 'ipad pro' in name_normalized:
+                device_type = 'ipad pro'
+            elif 'ipad air' in name_normalized:
+                device_type = 'ipad air'
+            elif 'ipad mini' in name_normalized:
+                device_type = 'ipad mini'
+            else:
+                device_type = 'ipad'
+            
+            # Extract screen size
+            screen_size = ''
+            size_match = re.search(r'(\d+(?:\.\d+)?)-?inch', name_normalized)
+            if size_match:
+                screen_size = size_match.group(1)
+            
+            # Extract chip/generation
+            chip_gen = ''
+            # Check for M-series chip (M1, M2, M3, M4)
+            m_chip_match = re.search(r'\(m(\d+)\)', name_normalized)
+            if m_chip_match:
+                chip_gen = f'm{m_chip_match.group(1)}'
+            else:
+                # Check for generation (e.g., "6th Generation", "5th Gen")
+                gen_match = re.search(r'(\d+)(?:st|nd|rd|th)\s*gen', name_normalized)
+                if gen_match:
+                    chip_gen = f'{gen_match.group(1)}th'
+                else:
+                    # Check for iPad mini with number (e.g., "iPad mini 6")
+                    mini_match = re.search(r'ipad\s+mini\s+(\d+)', name_normalized)
+                    if mini_match:
+                        chip_gen = mini_match.group(1)
+                    # Check for A-series chip (A17 Pro)
+                    a_chip_match = re.search(r'\(a(\d+)', name_normalized)
+                    if a_chip_match:
+                        chip_gen = f'a{a_chip_match.group(1)}'
+            
+            # Determine connectivity
+            connectivity = 'wifi'
+            if 'cellular' in name_normalized or 'wi-fi + cellular' in name_normalized or 'wi-fi+cellular' in name_normalized:
+                connectivity = 'cellular'
+            
+            # Look up model number
+            lookup_key = (device_type, screen_size, chip_gen, connectivity)
+            if lookup_key in self.IPAD_MODEL_NUMBERS:
+                return self.IPAD_MODEL_NUMBERS[lookup_key]
+            
+            # Try without screen size for iPad mini and older iPad Air
+            lookup_key_no_size = (device_type, '', chip_gen, connectivity)
+            if lookup_key_no_size in self.IPAD_MODEL_NUMBERS:
+                return self.IPAD_MODEL_NUMBERS[lookup_key_no_size]
+            
+            # Return empty if not found - will need to add more mappings
+            return ''
+        
+        # iPhone models - look up Apple model number
+        if 'iphone' in machine_type.lower():
+            # Extract iPhone model number and variant from name
+            # Examples: "iPhone 14 Pro 256GB", "iPhone 15 Pro Max 512GB", "iPhone SE"
+            
+            # Check for iPhone SE
+            if 'iphone se' in name_normalized:
+                gen_match = re.search(r'(\d+)(?:st|nd|rd|th)\s*gen', name_normalized)
+                if gen_match:
+                    gen = f'{gen_match.group(1)}rd' if gen_match.group(1) == '3' else f'{gen_match.group(1)}nd'
+                    lookup_key = ('se', gen)
+                else:
+                    lookup_key = ('se', '')
+                if lookup_key in self.IPHONE_MODEL_NUMBERS:
+                    return self.IPHONE_MODEL_NUMBERS[lookup_key]
+                return ''
+            
+            # Check for iPhone Air
+            if 'iphone air' in name_normalized:
+                lookup_key = ('air', '')
+                if lookup_key in self.IPHONE_MODEL_NUMBERS:
+                    return self.IPHONE_MODEL_NUMBERS[lookup_key]
+                return ''
+            
+            # Check for iPhone 16e
+            if 'iphone 16e' in name_normalized:
+                lookup_key = ('16e', '')
+                if lookup_key in self.IPHONE_MODEL_NUMBERS:
+                    return self.IPHONE_MODEL_NUMBERS[lookup_key]
+                return ''
+            
+            # Extract model number (14, 15, 16, 17, etc.) and variant (Pro, Pro Max, Plus, mini)
+            iphone_match = re.search(r'iphone\s*(\d+)\s*(pro\s*max|pro|plus|mini)?', name_normalized)
+            if iphone_match:
+                model_num = iphone_match.group(1)
+                variant = (iphone_match.group(2) or '').strip().replace('  ', ' ')
+                
+                lookup_key = (model_num, variant)
+                if lookup_key in self.IPHONE_MODEL_NUMBERS:
+                    return self.IPHONE_MODEL_NUMBERS[lookup_key]
+            
+            return ''
+        
+        # For Macs, return empty - will be populated from Variant lookup
+        return ''
     
     def _standardize_model(self, chip_or_model: str) -> str:
         """Extract model/generation from chip or model field."""
@@ -345,6 +715,120 @@ class AppleDataStandardizer:
         
         return color_mapping.get(color.lower(), color)
     
+    def _extract_colour_from_name(self, name: str) -> str:
+        """Extract colour from product name for iPhones/iPads."""
+        if not name:
+            return ''
+        
+        name_lower = name.lower()
+        
+        # iPhone/iPad colour patterns (order matters - check longer patterns first)
+        colour_patterns = [
+            # iPhone Titanium colours
+            ('natural titanium', 'Natural Titanium'),
+            ('blue titanium', 'Blue Titanium'),
+            ('white titanium', 'White Titanium'),
+            ('black titanium', 'Black Titanium'),
+            ('desert titanium', 'Desert Titanium'),
+            # iPhone Pro colours
+            ('space black', 'Space Black'),
+            ('deep purple', 'Deep Purple'),
+            ('sierra blue', 'Sierra Blue'),
+            ('alpine green', 'Alpine Green'),
+            # Standard colours
+            ('space grey', 'Space Grey'),
+            ('space gray', 'Space Grey'),
+            ('midnight', 'Midnight'),
+            ('starlight', 'Starlight'),
+            ('product red', 'Red'),
+            ('(product)red', 'Red'),
+            ('rose gold', 'Rose Gold'),
+            ('sky blue', 'Sky Blue'),
+            ('ultramarine', 'Ultramarine'),
+            ('silver', 'Silver'),
+            ('gold', 'Gold'),
+            ('blue', 'Blue'),
+            ('green', 'Green'),
+            ('pink', 'Pink'),
+            ('purple', 'Purple'),
+            ('yellow', 'Yellow'),
+            ('orange', 'Orange'),
+            ('red', 'Red'),
+            ('teal', 'Teal'),
+            ('white', 'White'),
+            ('black', 'Black'),
+        ]
+        
+        for pattern, colour in colour_patterns:
+            if pattern in name_lower:
+                return colour
+        
+        return ''
+    
+    def _extract_year_from_model(self, machine_type: str, model_number: str) -> str:
+        """Extract year based on iPhone/iPad model."""
+        if not machine_type:
+            return ''
+        
+        machine_lower = machine_type.lower()
+        
+        # iPhone year mapping based on model number
+        if 'iphone' in machine_lower:
+            iphone_years = {
+                # iPhone 17 series - 2025
+                '17': '2025',
+                # iPhone 16 series - 2024
+                '16': '2024',
+                # iPhone 15 series - 2023
+                '15': '2023',
+                # iPhone 14 series - 2022
+                '14': '2022',
+                # iPhone 13 series - 2021
+                '13': '2021',
+                # iPhone 12 series - 2020
+                '12': '2020',
+                # iPhone 11 series - 2019
+                '11': '2019',
+            }
+            # Extract model number from machine type (e.g., "iPhone 14 Pro" -> "14")
+            import re
+            model_match = re.search(r'iphone\s*(\d+)', machine_lower)
+            if model_match:
+                return iphone_years.get(model_match.group(1), '')
+            # Special cases
+            if 'se' in machine_lower:
+                return '2022'  # iPhone SE 3rd gen
+            if 'air' in machine_lower:
+                return '2025'  # iPhone Air
+        
+        # iPad year mapping based on chip/generation
+        if 'ipad' in machine_lower:
+            # For iPads, we can use the model number to determine year
+            ipad_model_years = {
+                # iPad Pro 13-inch/11-inch M5 - 2025 (newest)
+                'A3325': '2025', 'A3326': '2025', 'A3323': '2025', 'A3324': '2025',
+                # iPad Pro 13-inch/11-inch M4 - 2024
+                'A2925': '2024', 'A2926': '2024', 'A2836': '2024', 'A2837': '2024',
+                # iPad Pro 12.9-inch M2 (6th gen) / 11-inch M2 (4th gen) - 2022 (last 12.9-inch models)
+                'A2436': '2022', 'A2437': '2022', 'A2759': '2022', 'A2761': '2022',
+                # iPad Pro 12.9-inch M1 (5th gen) / 11-inch M1 (3rd gen) - 2021
+                'A2378': '2021', 'A2461': '2021', 'A2377': '2021', 'A2459': '2021',
+                # iPad Air M3 - 2025
+                'A3268': '2025', 'A3269': '2025', 'A3266': '2025', 'A3267': '2025',
+                # iPad Air M2 - 2024
+                'A2898': '2024', 'A2899': '2024', 'A2902': '2024', 'A2903': '2024',
+                # iPad Air M1 (5th gen) - 2022
+                'A2588': '2022', 'A2589': '2022',
+                # iPad mini 6th gen - 2021
+                'A2567': '2021', 'A2568': '2021',
+                # iPad mini A17 Pro - 2024
+                'A2993': '2024', 'A2995': '2024',
+            }
+            if model_number in ipad_model_years:
+                return ipad_model_years[model_number]
+        
+        return ''
+    
     def standardize_apple_product(self, apple_product: Dict) -> Dict:
         """Convert single Apple product to user's dashboard format."""
         standardized = {}
@@ -390,8 +874,32 @@ class AppleDataStandardizer:
         # Compute derived fields
         machine_type = self._standardize_machine_type(apple_product.get('name', ''))
         standardized['Machine'] = machine_type
-        standardized['Model'] = ''  # Will be populated from Variant ID lookup if available
-        standardized['Year'] = self._extract_year_from_chip(apple_product.get('chip', ''))
+        
+        # Extract Model - for iPads/iPhones, extract Apple model number; for Macs, will be populated from Variant lookup
+        product_name = apple_product.get('name', '')
+        model_number = self._extract_model_info(product_name, machine_type)
+        standardized['Model'] = model_number
+        
+        # Extract Year - from chip for Macs, from model for iPhones/iPads
+        year = self._extract_year_from_chip(apple_product.get('chip', ''))
+        if not year:
+            # Try to get year from iPhone/iPad model
+            year = self._extract_year_from_model(machine_type, model_number)
+        standardized['Year'] = year
+        
+        # Extract Colour - if not already populated, extract from product name
+        if not standardized.get('Colour'):
+            standardized['Colour'] = self._extract_colour_from_name(product_name)
+        
+        # Extract Storage from product name for iPhones/iPads if not already populated
+        if not standardized.get('HD (GB)') and ('iphone' in machine_type.lower() or 'ipad' in machine_type.lower()):
+            storage_match = re.search(r'(\d+)\s*(?:GB|TB)', product_name, re.IGNORECASE)
+            if storage_match:
+                storage_val = int(storage_match.group(1))
+                # Check if it's TB (usually 1TB or 2TB)
+                if 'TB' in product_name.upper() and storage_val <= 4:
+                    storage_val = storage_val * 1000
+                standardized['HD (GB)'] = str(storage_val)
         
         # Calculate price change (will be 0 for initial load)
         standardized['Change'] = 0
@@ -421,7 +929,10 @@ class AppleDataStandardizer:
         
         variant_id, model_number = self.find_variant_id_and_model(machine, year, cpu, cpu_cores, hd, ram, gpu, colour, grade)
         standardized['Variant ID'] = variant_id
-        standardized['Model'] = model_number  # Now populated with actual Apple model number (A2918, etc.)
+        # Only overwrite Model if we found one from Variant lookup (for Macs)
+        # Keep the extracted model info for iPads/iPhones
+        if model_number:
+            standardized['Model'] = model_number
         
         return standardized
     
@@ -444,6 +955,16 @@ class AppleMacScraperV7Historical:
     def __init__(self):
         self.base_url = "https://www.apple.com"
         self.mac_url = "https://www.apple.com/uk/shop/refurbished/mac"
+        self.ipad_url = "https://www.apple.com/uk/shop/refurbished/ipad"
+        self.iphone_url = "https://www.apple.com/uk/shop/refurbished/iphone"
+        
+        # Product categories to scrape (can be configured)
+        self.product_categories = {
+            'mac': self.mac_url,
+            'ipad': self.ipad_url,
+            'iphone': self.iphone_url
+        }
+        
         self.session = requests.Session()
         
         # Initialize standardizer for dual output (pass Google client for Variant ID lookup)
@@ -540,34 +1061,37 @@ class AppleMacScraperV7Historical:
                     print(f"❌ Failed to fetch {url} after {retries} attempts")
                     return None
 
-    def discover_all_pages(self) -> List[str]:
-        """Discover all pagination URLs for Mac refurbished products."""
-        print("🔍 Discovering all Mac refurbished pages...")
+    def discover_all_pages(self, category: str = 'mac') -> List[str]:
+        """Discover all pagination URLs for a given product category."""
+        category_url = self.product_categories.get(category, self.mac_url)
+        category_path = f'/{category}'
+        
+        print(f"🔍 Discovering all {category.upper()} refurbished pages...")
         
         # Start with the main page
-        soup = self.get_page(self.mac_url)
+        soup = self.get_page(category_url)
         if not soup:
-            return [self.mac_url]
+            return [category_url]
         
-        page_urls = [self.mac_url]
+        page_urls = [category_url]
         
         # Look for pagination links
         pagination_selectors = [
-            'a[href*="mac"][href*="page"]',
+            f'a[href*="{category}"][href*="page"]',
             '.pagination a',
             'a[href*="?page="]',
             'a[aria-label*="page"]',
             'a[href*="fnode"]'
         ]
         
-        found_pages = set([self.mac_url])
+        found_pages = set([category_url])
         
         for selector in pagination_selectors:
             pagination_links = soup.select(selector)
             print(f"🔍 Selector '{selector}' found {len(pagination_links)} links")
             for link in pagination_links:
                 href = link.get('href')
-                if href and '/mac' in href:
+                if href and category_path in href:
                     full_url = urljoin(self.base_url, href)
                     if full_url not in found_pages:
                         found_pages.add(full_url)
@@ -579,8 +1103,8 @@ class AppleMacScraperV7Historical:
             print("🔄 No pagination found, trying manual page construction...")
             for page_num in range(2, 7):
                 test_urls = [
-                    f"{self.mac_url}?page={page_num}",
-                    f"{self.mac_url}/page/{page_num}",
+                    f"{category_url}?page={page_num}",
+                    f"{category_url}/page/{page_num}",
                 ]
                 
                 for test_url in test_urls:
@@ -598,7 +1122,7 @@ class AppleMacScraperV7Historical:
                     print(f"   ❌ No valid page found for page {page_num}")
                     break
         
-        print(f"🎯 TOTAL PAGES DISCOVERED: {len(page_urls)}")
+        print(f"🎯 TOTAL {category.upper()} PAGES DISCOVERED: {len(page_urls)}")
         for i, url in enumerate(page_urls, 1):
             print(f"   {i}. {url}")
         
@@ -908,14 +1432,13 @@ class AppleMacScraperV7Historical:
                         specs['display_size'] = size
                     break
             
-            # COLOR EXTRACTION (unchanged)
+            # COLOR EXTRACTION - Sky Blue must come before Blue to match correctly
             color_patterns = [
                 r'[\-\s](Space (?:Grey|Gray|Black))',
                 r'[\-\s](Silver)', r'[\-\s](Gold)', r'[\-\s](Rose Gold)',
-                r'[\-\s](Midnight)', r'[\-\s](Starlight)', r'[\-\s](Blue)',
-                r'[\-\s](Green)', r'[\-\s](Pink)', r'[\-\s](Purple)',
-                r'[\-\s](Yellow)', r'[\-\s](Orange)', r'[\-\s](Red)',
-                r'[\-\s](Sky Blue)'
+                r'[\-\s](Midnight)', r'[\-\s](Starlight)', r'[\-\s](Sky Blue)',
+                r'[\-\s](Blue)', r'[\-\s](Green)', r'[\-\s](Pink)', r'[\-\s](Purple)',
+                r'[\-\s](Yellow)', r'[\-\s](Orange)', r'[\-\s](Red)'
             ]
             
             for pattern in color_patterns:
@@ -924,13 +1447,29 @@ class AppleMacScraperV7Historical:
                     specs['color'] = color_match.group(1).strip()
                     break
             
-            # CONNECTIVITY EXTRACTION (unchanged)
+            # CONNECTIVITY EXTRACTION - enhanced for iPad/iPhone
             if 'Gigabit Ethernet' in combined_text:
                 specs['connectivity'] = 'Gigabit Ethernet'
             elif '10Gb Ethernet' in combined_text:
                 specs['connectivity'] = '10Gb Ethernet'
+            elif 'Wi-Fi + Cellular' in combined_text or 'WiFi + Cellular' in combined_text:
+                specs['connectivity'] = 'Wi-Fi + Cellular'
+            elif 'Cellular' in combined_text and ('iPad' in product_name or 'iPhone' in product_name):
+                specs['connectivity'] = 'Wi-Fi + Cellular'
             elif 'Wi-Fi' in combined_text:
                 specs['connectivity'] = 'Wi-Fi'
+            
+            # IPHONE/IPAD SPECIFIC: Extract model variant (e.g., iPhone 15 Pro Max, iPad Pro)
+            iphone_match = re.search(r'iPhone\s+(\d+)(?:\s+(Pro|Pro Max|Plus|mini))?', product_name, re.IGNORECASE)
+            if iphone_match:
+                iphone_num = iphone_match.group(1)
+                iphone_variant = iphone_match.group(2) or ''
+                specs['model_variant'] = f"iPhone {iphone_num} {iphone_variant}".strip()
+            
+            ipad_match = re.search(r'iPad\s+(Pro|Air|mini)?(?:\s+(\d+(?:\.\d+)?)-?inch)?', product_name, re.IGNORECASE)
+            if ipad_match:
+                ipad_type = ipad_match.group(1) or ''
+                specs['model_variant'] = f"iPad {ipad_type}".strip()
             
             # Add specs to product
             product.update(specs)
@@ -1296,26 +1835,20 @@ class AppleMacScraperV7Historical:
         except Exception as e:
             print(f"❌ Failed to update Standardized History tab: {e}")
 
-    def scrape_all_mac_products(self) -> List[Dict]:
-        """MAIN SCRAPING METHOD - Your working method + historical tracking."""
-        print("🍎 Apple Mac Scraper V7 - Your Working V6 + Historical Tracking")
-        print("=" * 60)
+    def scrape_category(self, category: str) -> List[Dict]:
+        """Scrape a single product category (mac, ipad, or iphone)."""
+        print(f"\n{'='*60}")
+        print(f"📱 SCRAPING {category.upper()} PRODUCTS")
+        print(f"{'='*60}")
         
-        # NEW: Load previous data for comparison
-        previous_data = self.load_previous_data()
-        
-        # Discover all pages (unchanged)
-        page_urls = self.discover_all_pages()
+        # Discover all pages for this category
+        page_urls = self.discover_all_pages(category)
         
         all_products = []
         seen_urls = set()
         
-        # STEP 1: Extract products WITH PRICES from category pages (unchanged)
-        print(f"\n🎯 STEP 1: EXTRACTING PRODUCTS WITH PRICES FROM CATEGORY PAGES")
-        print("=" * 60)
-        
         for page_num, page_url in enumerate(page_urls, 1):
-            print(f"\n📄 SCRAPING PAGE {page_num}/{len(page_urls)}")
+            print(f"\n📄 SCRAPING {category.upper()} PAGE {page_num}/{len(page_urls)}")
             print(f"🔗 URL: {page_url}")
             
             soup = self.get_page(page_url)
@@ -1325,6 +1858,10 @@ class AppleMacScraperV7Historical:
             # Extract products with pricing from category page
             page_products = self.extract_products_with_prices_from_category_page(soup)
             
+            # Add category tag to each product
+            for product in page_products:
+                product['category'] = category
+            
             # Filter out duplicates
             new_products = []
             for product in page_products:
@@ -1332,11 +1869,51 @@ class AppleMacScraperV7Historical:
                     seen_urls.add(product['url'])
                     new_products.append(product)
             
-            print(f"📦 Found {len(new_products)} new products with pricing on this page")
+            print(f"📦 Found {len(new_products)} new {category} products with pricing")
             all_products.extend(new_products)
             
             # Be respectful between pages
             time.sleep(2)
+        
+        print(f"\n🎯 TOTAL {category.upper()} PRODUCTS: {len(all_products)}")
+        return all_products
+
+    def scrape_all_mac_products(self, categories: List[str] = None) -> List[Dict]:
+        """MAIN SCRAPING METHOD - Now supports Mac, iPad, and iPhone.
+        
+        Args:
+            categories: List of categories to scrape. Defaults to ['mac'] for backward compatibility.
+                       Options: 'mac', 'ipad', 'iphone'
+        """
+        if categories is None:
+            categories = ['mac']  # Default to Mac only for backward compatibility
+        
+        print("🍎 Apple Refurbished Scraper V7 - Mac, iPad & iPhone Support")
+        print("=" * 60)
+        print(f"📋 Categories to scrape: {', '.join(categories)}")
+        
+        # NEW: Load previous data for comparison
+        previous_data = self.load_previous_data()
+        
+        all_products = []
+        seen_urls = set()
+        
+        # STEP 1: Extract products WITH PRICES from all category pages
+        print(f"\n🎯 STEP 1: EXTRACTING PRODUCTS WITH PRICES FROM CATEGORY PAGES")
+        print("=" * 60)
+        
+        for category in categories:
+            if category not in self.product_categories:
+                print(f"⚠️ Unknown category: {category}, skipping...")
+                continue
+            
+            category_products = self.scrape_category(category)
+            
+            # Filter out duplicates across categories
+            for product in category_products:
+                if product['url'] not in seen_urls:
+                    seen_urls.add(product['url'])
+                    all_products.append(product)
         
         print(f"\n🎯 TOTAL PRODUCTS WITH PRICING: {len(all_products)}")
         products_with_prices = len([p for p in all_products if p.get('current_price')])
@@ -1554,11 +2131,21 @@ class AppleMacScraperV7Historical:
         print(f"   🔗 View data: https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}")
 
 
-def main():
-    """Main function to run the historical scraper."""
-    print("🍎 Apple Mac Refurbished Scraper V7")
-    print("🔧 Your Working V6 + Basic Historical Tracking")
+def main(categories: List[str] = None):
+    """Main function to run the historical scraper.
+    
+    Args:
+        categories: List of categories to scrape. Options: 'mac', 'ipad', 'iphone'
+                   Defaults to ['mac', 'ipad', 'iphone'] to scrape all.
+    """
+    if categories is None:
+        # Default: scrape all categories
+        categories = ['mac', 'ipad', 'iphone']
+    
+    print("🍎 Apple Refurbished Scraper V7")
+    print("🔧 Now with Mac, iPad & iPhone Support!")
     print("=" * 50)
+    print(f"📋 Categories: {', '.join(categories)}")
     
     scraper = AppleMacScraperV7Historical()
     
@@ -1582,8 +2169,8 @@ def main():
     
     print(f"\n⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Scrape all Mac products with historical tracking
-    products = scraper.scrape_all_mac_products()
+    # Scrape products from specified categories
+    products = scraper.scrape_all_mac_products(categories=categories)
     
     # Print comprehensive summary
     scraper.print_summary(products)
@@ -1626,4 +2213,25 @@ def main():
 
 
 if __name__ == "__main__":
-    products = main()
+    import sys
+    
+    # Parse command line arguments for categories
+    # Usage: python histv7.py [categories]
+    # Examples:
+    #   python histv7.py                    # Scrape all (mac, ipad, iphone)
+    #   python histv7.py mac                # Scrape Mac only
+    #   python histv7.py ipad               # Scrape iPad only  
+    #   python histv7.py iphone             # Scrape iPhone only
+    #   python histv7.py mac ipad           # Scrape Mac and iPad
+    #   python histv7.py mac ipad iphone    # Scrape all
+    
+    if len(sys.argv) > 1:
+        categories = [arg.lower() for arg in sys.argv[1:] if arg.lower() in ['mac', 'ipad', 'iphone']]
+        if not categories:
+            print("⚠️ Invalid categories. Valid options: mac, ipad, iphone")
+            print("   Using default: all categories")
+            categories = None
+    else:
+        categories = None  # Default to all
+    
+    products = main(categories=categories)
