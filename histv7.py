@@ -192,16 +192,17 @@ class AppleDataStandardizer:
             # Fetch all variants
             cursor.execute("""
                 SELECT variant_id, machine, model, year, cpu, cpu_cores, 
-                       storage, ram, gpu, colour, grade
+                       storage, ram, gpu, colour, grade, screen
                 FROM variants
             """)
             rows = cursor.fetchall()
             
             print(f"✅ Loaded {len(rows)} variants from database")
             
-            # Build lookup tables
-            self.variant_lookup = {}  # Full lookup for Macs
+            # Build lookup tables - store both variant_id and model
+            self.variant_lookup = {}  # Full lookup for Macs: key -> (variant_id, model)
             self.variant_lookup_simple = {}  # Simple lookup for iPhone/iPad
+            self.variant_lookup_display = {}  # Studio Display lookup: key -> (variant_id, model)
             
             for row in rows:
                 variant_id = str(row['variant_id'])
@@ -215,11 +216,19 @@ class AppleDataStandardizer:
                 gpu = row['gpu'] or ''
                 colour = row['colour'] or ''
                 grade = row['grade'] or ''
+                screen = row['screen'] or ''
+                
+                # Studio Display lookup (machine|cpu|screen|grade) - cpu=stand type, screen=glass type
+                if machine.lower() == 'studio display':
+                    # Normalize screen value - 'null' string should be empty
+                    screen_normalized = '' if screen.lower() == 'null' else screen
+                    display_key = f"{machine}|{cpu}|{screen_normalized}|{grade}".lower()
+                    self.variant_lookup_display[display_key] = (variant_id, model)
                 
                 # Full lookup key for Macs (machine|year|cpu|cpu_cores|storage|ram|gpu|colour|grade)
-                if cpu and ram:  # Mac products have CPU and RAM
+                elif cpu and ram:  # Mac products have CPU and RAM
                     lookup_key = f"{machine}|{year}|{cpu}|{cpu_cores}|{storage}|{ram}|{gpu}|{colour}|{grade}".lower()
-                    self.variant_lookup[lookup_key] = variant_id
+                    self.variant_lookup[lookup_key] = (variant_id, model)  # Store tuple with model
                 
                 # Simple lookup key for iPhone/iPad (machine|storage|colour|grade)
                 # These products don't have CPU/RAM in the traditional sense
@@ -230,15 +239,29 @@ class AppleDataStandardizer:
             cursor.close()
             conn.close()
             
-            print(f"✅ Created lookup tables: {len(self.variant_lookup)} Mac entries, {len(self.variant_lookup_simple)} iPhone/iPad entries")
+            print(f"✅ Created lookup tables: {len(self.variant_lookup)} Mac entries, {len(self.variant_lookup_simple)} iPhone/iPad entries, {len(self.variant_lookup_display)} Studio Display entries")
             
         except Exception as e:
             print(f"❌ Error loading Variant ID lookup from database: {e}")
             self.variant_lookup = None
             self.variant_lookup_simple = None
     
-    def find_variant_id_and_model(self, machine: str, year: str, cpu: str, cpu_cores: str, hd: str, ram: str, gpu: str, colour: str, grade: str) -> tuple:
+    def find_variant_id_and_model(self, machine: str, year: str, cpu: str, cpu_cores: str, hd: str, ram: str, gpu: str, colour: str, grade: str, screen: str = '') -> tuple:
         """Find Variant ID for given specifications using database lookup."""
+        
+        # For Studio Display, use display lookup (machine|cpu|screen|grade)
+        if machine.lower() == 'studio display' and hasattr(self, 'variant_lookup_display') and self.variant_lookup_display:
+            display_key = f"{machine}|{cpu}|{screen}|{grade}".lower()
+            if display_key in self.variant_lookup_display:
+                return self.variant_lookup_display[display_key]
+            
+            # Try with different grade variations
+            for try_grade in ['Excellent', 'Good', 'Fair', 'Premium']:
+                display_key = f"{machine}|{cpu}|{screen}|{try_grade}".lower()
+                if display_key in self.variant_lookup_display:
+                    return self.variant_lookup_display[display_key]
+            
+            return '', ''
         
         # For iPhone/iPad, use simple lookup (machine|storage|colour|grade)
         if self.variant_lookup_simple and ('iphone' in machine.lower() or 'ipad' in machine.lower()):
@@ -279,32 +302,41 @@ class AppleDataStandardizer:
         lookup_key = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
         
         if lookup_key in self.variant_lookup:
-            variant_id = self.variant_lookup[lookup_key]
-            return variant_id, ''  # Return Variant ID, empty model (will be populated from Variant Map if needed)
+            variant_id, model = self.variant_lookup[lookup_key]
+            return variant_id, model
         
         # Try without GPU (common case where GPU field might be empty)
         lookup_key_no_gpu = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}||{colour}|{grade}".lower()
         if lookup_key_no_gpu in self.variant_lookup:
-            variant_id = self.variant_lookup[lookup_key_no_gpu]
-            return variant_id, ''
+            variant_id, model = self.variant_lookup[lookup_key_no_gpu]
+            return variant_id, model
         
         # Try without color (common case where color field might be empty)
         lookup_key_no_color = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|{gpu}||{grade}".lower()
         if lookup_key_no_color in self.variant_lookup:
-            variant_id = self.variant_lookup[lookup_key_no_color]
-            return variant_id, ''
+            variant_id, model = self.variant_lookup[lookup_key_no_color]
+            return variant_id, model
         
         # Try without both GPU and color
         lookup_key_minimal = f"{machine}|{year}|{cpu}|{cpu_cores}|{hd}|{ram}|||{grade}".lower()
         if lookup_key_minimal in self.variant_lookup:
-            variant_id = self.variant_lookup[lookup_key_minimal]
-            return variant_id, ''
+            variant_id, model = self.variant_lookup[lookup_key_minimal]
+            return variant_id, model
         
         # Try without CPU cores (might not always be available)
         lookup_key_no_cores = f"{machine}|{year}|{cpu}||{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
         if lookup_key_no_cores in self.variant_lookup:
-            variant_id = self.variant_lookup[lookup_key_no_cores]
-            return variant_id, ''
+            variant_id, model = self.variant_lookup[lookup_key_no_cores]
+            return variant_id, model
+        
+        # Special case for iMac M4: try alternative cpu_cores (8-core vs 10-core)
+        # Both 2-port (8-core) and 4-port (10-core) can have same storage/RAM configs
+        if 'imac' in machine.lower() and cpu == 'M4':
+            alt_cores = '10' if cpu_cores == '8' else '8'
+            lookup_key_alt_cores = f"{machine}|{year}|{cpu}|{alt_cores}|{hd}|{ram}|{gpu}|{colour}|{grade}".lower()
+            if lookup_key_alt_cores in self.variant_lookup:
+                variant_id, model = self.variant_lookup[lookup_key_alt_cores]
+                return variant_id, model
                 
         return '', ''
     
@@ -357,6 +389,9 @@ class AppleDataStandardizer:
             
         elif 'mac pro' in name_normalized:
             return 'Mac Pro'
+        
+        elif 'studio display' in name_normalized:
+            return 'Studio Display'
         
         # iPad products - check specific types first (Pro, Air, mini) before generic iPad
         elif 'ipad pro' in name_normalized:
@@ -645,44 +680,87 @@ class AppleDataStandardizer:
         return chip_or_model
     
     def _standardize_storage_format(self, storage_gb: str) -> str:
-        """Convert storage to proper format (256, 512, 1TB, 2TB, etc.)."""
+        """Convert storage to numeric GB format (256, 512, 1000, 2000, etc.).
+        
+        Always returns numeric GB value to match variant map format.
+        """
         if not storage_gb:
             return ''
         
         try:
             gb_value = float(storage_gb)
-            # Convert values >= 1000 GB to TB format
-            if gb_value >= 1000 and gb_value % 1000 == 0:
-                tb_value = int(gb_value / 1000)
-                return f'{tb_value}TB'
-            else:
-                # Keep as number for values < 1000
-                return str(int(gb_value)) if gb_value == int(gb_value) else str(gb_value)
+            # Always return numeric value in GB (variant map uses 1000, 2000, etc.)
+            return str(int(gb_value)) if gb_value == int(gb_value) else str(gb_value)
         except (ValueError, TypeError):
             return str(storage_gb)
     
-    def _extract_year_from_chip(self, chip: str) -> str:
-        """Estimate year based on chip generation."""
+    def _extract_year_from_chip(self, chip: str, machine: str = '') -> str:
+        """Estimate year based on chip generation and machine type.
+        
+        Release years vary by machine type, especially for MacBook Air:
+        - MacBook Air 13-inch M2: June 2022
+        - MacBook Air 15-inch M2: June 2023
+        - MacBook Air 13-inch M3: March 2024
+        - MacBook Air 15-inch M3: March 2024
+        - MacBook Air M4: March 2025
+        """
         if not chip:
             return ''
         
-        # Year mapping for M-series chips
+        machine_lower = machine.lower() if machine else ''
+        is_15_inch = '15-inch' in machine_lower or '15 inch' in machine_lower
+        
+        # M4 chip year depends on machine type
+        if chip == 'M4':
+            if 'macbook air' in machine_lower:
+                return '2025'
+            elif 'ipad' in machine_lower:
+                return '2024'
+            else:
+                # Mac mini, iMac, MacBook Pro base M4
+                return '2024'
+        
+        if chip == 'M4 Pro':
+            # Mac mini M4 Pro, MacBook Pro M4 Pro: Nov 2024
+            return '2024'
+        
+        if chip == 'M4 Max':
+            if 'mac studio' in machine_lower:
+                return '2025'
+            else:
+                # MacBook Pro M4 Max: Nov 2024
+                return '2024'
+        
+        # M3 - MacBook Air released March 2024
+        if chip == 'M3':
+            if 'macbook air' in machine_lower:
+                return '2024'
+            else:
+                # iMac M3, MacBook Pro M3: Oct 2023
+                return '2023'
+        
+        # M2 - MacBook Air 15-inch released June 2023, 13-inch June 2022
+        if chip == 'M2':
+            if 'macbook air' in machine_lower and is_15_inch:
+                return '2023'
+            elif 'macbook air' in machine_lower:
+                return '2022'
+            else:
+                # Mac mini M2, MacBook Pro M2: 2022
+                return '2022'
+        
+        # Year mapping for other M-series chips
         year_mapping = {
             'M1': '2020',
             'M1 Pro': '2021', 
             'M1 Max': '2021',
             'M1 Ultra': '2022',
-            'M2': '2022',
             'M2 Pro': '2023',
             'M2 Max': '2023',
             'M2 Ultra': '2023',
-            'M3': '2023',
             'M3 Pro': '2023',
             'M3 Max': '2023',
-            'M3 Ultra': '2025',  # Special case
-            'M4': '2024',
-            'M4 Pro': '2024',
-            'M4 Max': '2024'
+            'M3 Ultra': '2025',
         }
         
         return year_mapping.get(chip, '')
@@ -880,8 +958,8 @@ class AppleDataStandardizer:
         model_number = self._extract_model_info(product_name, machine_type)
         standardized['Model'] = model_number
         
-        # Extract Year - from chip for Macs, from model for iPhones/iPads
-        year = self._extract_year_from_chip(apple_product.get('chip', ''))
+        # Extract Year - from chip for Macs (with machine type for M4), from model for iPhones/iPads
+        year = self._extract_year_from_chip(apple_product.get('chip', ''), machine_type)
         if not year:
             # Try to get year from iPhone/iPad model
             year = self._extract_year_from_model(machine_type, model_number)
@@ -890,6 +968,27 @@ class AppleDataStandardizer:
         # Extract Colour - if not already populated, extract from product name
         if not standardized.get('Colour'):
             standardized['Colour'] = self._extract_colour_from_name(product_name)
+        
+        # Special handling for Studio Display - extract stand type and screen type
+        if machine_type == 'Studio Display':
+            product_name_lower = product_name.lower()
+            # Extract stand type -> stored in CPU field
+            if 'height-adjustable' in product_name_lower or 'height adjustable' in product_name_lower:
+                standardized['CPU'] = 'HEIGHT + TILT'
+            elif 'tilt-adjustable' in product_name_lower or 'tilt adjustable' in product_name_lower:
+                standardized['CPU'] = 'TILT'
+            elif 'vesa' in product_name_lower:
+                standardized['CPU'] = 'VESA'
+            
+            # Extract screen type -> stored in Screen field (will need to add to variant lookup)
+            if 'nano-texture' in product_name_lower or 'nano texture' in product_name_lower:
+                standardized['Screen'] = 'Nano'
+            else:
+                standardized['Screen'] = ''  # Standard glass
+            
+            # Set fixed values for Studio Display
+            standardized['Model'] = 'A2525'
+            standardized['Year'] = '2022'
         
         # Extract Storage from product name for iPhones/iPads
         # ALWAYS extract from product name for these devices as page-scraped storage shows max options, not actual product storage
@@ -929,8 +1028,9 @@ class AppleDataStandardizer:
         gpu = standardized.get('GPU', '')
         colour = standardized.get('Colour', '')
         grade = standardized.get('Grade', '')
+        screen = standardized.get('Screen', '')
         
-        variant_id, model_number = self.find_variant_id_and_model(machine, year, cpu, cpu_cores, hd, ram, gpu, colour, grade)
+        variant_id, model_number = self.find_variant_id_and_model(machine, year, cpu, cpu_cores, hd, ram, gpu, colour, grade, screen)
         standardized['Variant ID'] = variant_id
         # Only overwrite Model if we found one from Variant lookup (for Macs)
         # Keep the extracted model info for iPads/iPhones

@@ -61,9 +61,9 @@ class DatabaseWriter:
                 INSERT INTO apple_history (
                     title, url, condition, grade, price, price_change, seller,
                     machine, model, year, cpu, cpu_cores, storage, ram, gpu, colour,
-                    variant_id, warning, scraped_at
+                    variant_id, warning, scraped_at, screen
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
             """
             
@@ -120,7 +120,8 @@ class DatabaseWriter:
                         product.get('Colour'),
                         product.get('Variant ID'),
                         product.get('Warning'),
-                        scraped_at
+                        scraped_at,
+                        product.get('Screen')  # For Studio Display glass type
                     )
                     
                     cursor.execute(insert_query, values)
